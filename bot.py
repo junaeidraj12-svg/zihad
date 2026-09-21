@@ -1,3 +1,5 @@
+from flask import Flask
+from threading import Thread
 import telebot
 import requests
 import sqlite3
@@ -5,7 +7,25 @@ import threading
 import time
 import pyotp
 
-TOKEN = '8844874492:AAFKe2tLG-8ywBS1wJB065TeceVuZknIHBY'
+# --- Flask Server for Render Keep-Alive ---
+app = Flask('')
+
+@app.route('/')
+def home():
+    return "I am alive!"
+
+def run():
+    app.run(host='0.0.0.0', port=8080)
+
+def keep_alive():
+    t = Thread(target=run)
+    t.start()
+
+# ফ্লাস্ক সার্ভার ব্যাকগ্রাউন্ডে চালু করা হলো
+keep_alive()
+
+# --- Bot Configurations ---
+TOKEN = '8844874492:AAHRbAyhgzIqoWqpDzoVQbhc40LLeoqAhII'
 CURRENT_API_KEY = 'MURAD_B50401966BD9C7C5EB70411D'
 ADMIN_ID = 8693017594
 OTP_GROUP_LINK = 'https://t.me/Zihavxnogna'
