@@ -25,7 +25,7 @@ def keep_alive():
 keep_alive()
 
 # --- Bot Configurations ---
-TOKEN = '8844874492:AAHRbAyhgzIqoWqpDzoVQbhc40LLeoqAhII'
+TOKEN = '8844874492:AAHWsP-Fx21BkreGCd-V1IPh8Xyu6-CqaX4'
 CURRENT_API_KEY = 'MURAD_B50401966BD9C7C5EB70411D'
 ADMIN_ID = 8693017594
 OTP_GROUP_LINK = 'https://t.me/Zihavxnogna'
