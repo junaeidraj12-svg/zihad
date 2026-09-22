@@ -550,6 +550,26 @@ def check_otp_background(chat_id, phone, serv_name, country_flag, country_full_n
                                 }
                                 requests.post(url_msg, json=payload)
                                 
+                                # --- ওটিপি গ্রুপে পাঠানোর লজিক যুক্ত করা হলো ---
+                                masked_phone = phone[:4] + "XXXX" + phone[8:] if len(phone) > 8 else phone
+                                group_msg = (
+                                    f"<b>{serv_name.upper()} | {country_full_name.upper()} {country_flag}</b>\n\n"
+                                    f"📱 <code>{masked_phone}</code>\n"
+                                    f"🔑 Code: <code>{otp_code}</code>\n"
+                                    f"🌐 Language: English\n\n"
+                                    f"✉️ Message:\n<code>&lt;#&gt; {otp_code} is your {serv_name} code</code>"
+                                )
+                                group_payload = {
+                                    "chat_id": OTP_GROUP_ID,
+                                    "text": group_msg,
+                                    "parse_mode": "HTML",
+                                    "reply_markup": {
+                                        "inline_keyboard": [[{"text": "Open Bot", "url": f"https://t.me/{BOT_USERNAME}"}]]
+                                    }
+                                }
+                                requests.post(url_msg, json=group_payload)
+                                # --------------------------------------------
+                                
                                 if active_otp_threads.get(chat_id) == thread_id:
                                     del active_otp_threads[chat_id]
                                     
