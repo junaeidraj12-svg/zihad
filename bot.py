@@ -1,5 +1,4 @@
 from flask import Flask, request
-from threading import Thread
 import telebot
 import requests
 import sqlite3
@@ -31,6 +30,7 @@ CURRENT_BUTTON_STYLE = "success"
 
 bot = telebot.TeleBot(TOKEN)
 user_states = {}
+active_otp_threads = {}
 
 service_status = {
     "Facebook": True,
@@ -506,8 +506,11 @@ def handle_all_messages(message):
             )
         del user_states[user_id]
 
-def check_otp_background(chat_id, phone, serv_name, country_flag, country_full_name, short_code):
+def check_otp_background(chat_id, phone, serv_name, country_flag, country_full_name, short_code, thread_id):
     for _ in range(60):
+        if active_otp_threads.get(chat_id) != thread_id:
+            return
+            
         try:
             url = f"{API_BASE_URL}success-otp-info"
             headers = {'X-API-Key': CURRENT_API_KEY}
@@ -523,6 +526,9 @@ def check_otp_background(chat_id, phone, serv_name, country_flag, country_full_n
                             otp_code = item.get('otp')
                             
                             if otp_code:
+                                if active_otp_threads.get(chat_id) != thread_id:
+                                    return
+                                    
                                 cursor.execute('UPDATE users SET balance = balance + ? WHERE user_id = ?', (OTP_REWARD, chat_id,))
                                 conn.commit()
                                 
@@ -544,34 +550,16 @@ def check_otp_background(chat_id, phone, serv_name, country_flag, country_full_n
                                 }
                                 requests.post(url_msg, json=payload)
                                 
-                                masked_phone = phone[:4] + "XXXXX" + phone[-4:] if len(phone) > 8 else phone
-                                
-                                group_msg = (
-                                    f"<b>{serv_name.upper()} | {country_flag} {short_code.upper()}</b>\n\n"
-                                    f"📱 <code>{masked_phone}</code>\n\n"
-                                    f"🔑 Code: <code>{otp_code}</code>\n\n"
-                                    f"🌐 Language: English\n\n"
-                                    f"📨 Message:\n"
-                                    f"<code>&lt;#&gt; {otp_code} is your {serv_name} code</code>"
-                                )
-                                
-                                group_inline = [[{"text": "Open Bot", "url": f"https://t.me/{BOT_USERNAME}", "style": "primary"}]]
-                                group_payload = {
-                                    "chat_id": OTP_GROUP_ID,
-                                    "text": group_msg,
-                                    "reply_markup": {"inline_keyboard": group_inline},
-                                    "parse_mode": "HTML"
-                                }
-                                try:
-                                    requests.post(url_msg, json=group_payload)
-                                except Exception as g_err:
-                                    print(f"Group Send Error: {g_err}")
+                                if active_otp_threads.get(chat_id) == thread_id:
+                                    del active_otp_threads[chat_id]
                                     
                                 return
             time.sleep(3)
         except Exception as e:
-            print(f"OTP Check Error: {e}")
             time.sleep(3)
+            
+    if active_otp_threads.get(chat_id) == thread_id:
+        del active_otp_threads[chat_id]
 
 @bot.callback_query_handler(func=lambda call: True)
 def callback_handler(call):
@@ -734,6 +722,9 @@ def callback_handler(call):
                     if phone:
                         bot.answer_callback_query(call.id, "New number assigned!")
                         
+                        thread_id = time.time()
+                        active_otp_threads[chat_id] = thread_id
+                        
                         inline_keyboard = [
                             [
                                 {"text": "Change", "callback_data": f"get_num_{row_id}", "style": "danger"},
@@ -761,13 +752,12 @@ def callback_handler(call):
                             "reply_markup": {"inline_keyboard": inline_keyboard}
                         })
                         
-                        threading.Thread(target=check_otp_background, args=(chat_id, phone, serv_name, c_flag, country_full_name, short_code)).start()
+                        threading.Thread(target=check_otp_background, args=(chat_id, phone, serv_name, c_flag, country_full_name, short_code, thread_id)).start()
                     else:
                         bot.answer_callback_query(call.id, "No numbers available right now!", show_alert=True)
                 else:
                     bot.answer_callback_query(call.id, "Stock out!", show_alert=True)
         except Exception as e:
-            print(f"API Error: {e}")
             bot.answer_callback_query(call.id, "API connection error.", show_alert=True)
         return
 
@@ -1126,7 +1116,6 @@ def callback_handler(call):
 if __name__ == '__main__':
     port = int(os.environ.get('PORT', 8080))
     
-    # অটোমেটিক ওয়েব হুক সেট করা
     RENDER_URL = os.environ.get('RENDER_EXTERNAL_URL')
     if RENDER_URL:
         bot.remove_webhook()
