@@ -1,4 +1,4 @@
-from flask import Flask
+from flask import Flask, request
 from threading import Thread
 import telebot
 import requests
@@ -6,23 +6,10 @@ import sqlite3
 import threading
 import time
 import pyotp
+import os
 
-# --- Flask Server for Render Keep-Alive ---
+# --- Flask Server & Bot Setup ---
 app = Flask('')
-
-@app.route('/')
-def home():
-    return "I am alive!"
-
-def run():
-    app.run(host='0.0.0.0', port=8080)
-
-def keep_alive():
-    t = Thread(target=run)
-    t.start()
-
-# ফ্লাস্ক সার্ভার ব্যাকগ্রাউন্ডে চালু করা হলো
-keep_alive()
 
 # --- Bot Configurations ---
 TOKEN = '8844874492:AAHWsP-Fx21BkreGCd-V1IPh8Xyu6-CqaX4'
@@ -147,6 +134,20 @@ def set_bot_commands():
     bot.set_my_commands(commands)
 
 set_bot_commands()
+
+@app.route('/')
+def home():
+    return "I am alive!"
+
+@app.route(f'/{TOKEN}', methods=['POST'])
+def webhook():
+    if request.headers.get('content-type') == 'application/json':
+        json_string = request.get_data().decode('utf-8')
+        update = telebot.types.Update.de_json(json_string)
+        bot.process_new_updates([update])
+        return '', 200
+    else:
+        return '', 403
 
 @bot.message_handler(commands=['start'])
 def send_welcome(message):
@@ -1122,5 +1123,15 @@ def callback_handler(call):
                 "reply_markup": back_markup.to_json()
             })
 
-print("Bot is running successfully...")
-bot.infinity_polling()
+if __name__ == '__main__':
+    port = int(os.environ.get('PORT', 8080))
+    
+    # অটোমেটিক ওয়েব হুক সেট করা
+    RENDER_URL = os.environ.get('RENDER_EXTERNAL_URL')
+    if RENDER_URL:
+        bot.remove_webhook()
+        bot.set_webhook(url=f"{RENDER_URL}/{TOKEN}")
+        print(f"Webhook set to: {RENDER_URL}/{TOKEN}")
+
+    print("Bot is running successfully with Webhook...")
+    app.run(host='0.0.0.0', port=port)
