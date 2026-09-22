@@ -11,7 +11,7 @@ import os
 app = Flask('')
 
 # --- Bot Configurations ---
-TOKEN = '8844874492:AAF8p7MpT1GN7gm5j-Lj8aJ3LiV4G1SCz_Q'
+TOKEN = '8844874492:AAHWsP-Fx21BkreGCd-V1IPh8Xyu6-CqaX4'
 CURRENT_API_KEY = 'MURAD_B50401966BD9C7C5EB70411D'
 ADMIN_ID = 8693017594
 OTP_GROUP_LINK = 'https://t.me/Zihavxnogna'
@@ -472,4 +472,677 @@ def handle_all_messages(message):
 
     elif text == '🆘 Help & Support':
         inline_keyboard = [[{"text": "Support", "url": f"https://t.me/{SUPPORT_ADMIN_USERNAME}", "style": CURRENT_BUTTON_STYLE}]]
-        url = f"https://api.telegram.org/bot{TOKEN}/sendMes
+        url = f"https://api.telegram.org/bot{TOKEN}/sendMessage"
+        payload = {
+            "chat_id": message.chat.id,
+            "text": "Please contact the admin for any issues.",
+            "reply_markup": {"inline_keyboard": inline_keyboard}
+        }
+        requests.post(url, json=payload)
+
+    elif text == '💰 Balance':
+        check_balance(message)
+
+    elif text == '💵 Withdraw':
+        withdraw_money(message)
+
+    elif text == '⚙️ Admin Panel' and is_admin(user_id):
+        bot.send_message(message.chat.id, "⚙️ **Admin Control Panel:**", reply_markup=get_admin_markup(), parse_mode='Markdown')
+
+    elif user_states.get(user_id) == 'waiting_for_2fa_key':
+        key = text.strip().replace(" ", "")
+        try:
+            totp = pyotp.TOTP(key)
+            current_code = totp.now()
+            bot.send_message(
+                message.chat.id, 
+                f"✅ **2FA Code Generated Successfully!**\n\n🔑 Key: `{key}`\n\n⚡ Live Code: `{current_code}`", 
+                parse_mode='Markdown'
+            )
+        except Exception as e:
+            bot.send_message(
+                message.chat.id, 
+                "❌ Invalid 2FA secret key provided! Please check and try again with a valid key."
+            )
+        del user_states[user_id]
+
+def check_otp_background(chat_id, phone, serv_name, country_flag, country_full_name, short_code, thread_id):
+    last_otp = None
+    for _ in range(60):
+        if active_otp_threads.get(chat_id) != thread_id:
+            return
+            
+        try:
+            url = f"{API_BASE_URL}success-otp-info"
+            headers = {'X-API-Key': CURRENT_API_KEY}
+            
+            response = requests.get(url, headers=headers, timeout=5)
+            if response.status_code == 200:
+                res_json = response.json()
+                if res_json.get('meta', {}).get('code') == 200:
+                    otps_list = res_json.get('data', {}).get('otps', [])
+                    for item in otps_list:
+                        api_number = item.get('number', '')
+                        if phone in api_number or api_number in phone:
+                            otp_code = item.get('otp')
+                            
+                            if otp_code and otp_code != last_otp:
+                                last_otp = otp_code
+                                
+                                if active_otp_threads.get(chat_id) != thread_id:
+                                    return
+                                    
+                                cursor.execute('UPDATE users SET balance = balance + ? WHERE user_id = ?', (OTP_REWARD, chat_id,))
+                                conn.commit()
+                                
+                                cursor.execute('SELECT balance FROM users WHERE user_id = ?', (chat_id,))
+                                new_bal = cursor.fetchone()[0]
+                                
+                                user_msg = (
+                                    f"{country_flag} <code>{phone}</code>\n\n"
+                                    f"🔑 <b>OTP :</b> <code>{otp_code}</code>\n"
+                                    f"💰 <b>Earned:</b> +${OTP_REWARD:.4f}\n\n"
+                                    f"💵 <b>Total Balance:</b> ${new_bal:.4f}"
+                                )
+                                
+                                url_msg = f"https://api.telegram.org/bot{TOKEN}/sendMessage"
+                                payload = {
+                                    "chat_id": chat_id,
+                                    "text": user_msg,
+                                    "parse_mode": "HTML"
+                                }
+                                requests.post(url_msg, json=payload)
+                                
+                                masked_phone = phone[:4] + "XXXX" + phone[-4:] if len(phone) > 7 else phone
+                                group_msg = (
+                                    f"<b>{serv_name.upper()} | {country_flag} {short_code}</b>\n\n"
+                                    f"📱 Number: <code>+{masked_phone}</code>\n"
+                                    f"🔑 Code: <code>{otp_code}</code>\n\n"
+                                    f"🌐 Language: English\n\n"
+                                    f"✉️ Message:\n"
+                                    f"<code>&lt;#&gt; {otp_code} is your {serv_name} code</code>"
+                                )
+                                group_payload = {
+                                    "chat_id": OTP_GROUP_ID,
+                                    "text": group_msg,
+                                    "parse_mode": "HTML",
+                                    "reply_markup": {
+                                        "inline_keyboard": [[{"text": "Open Bot", "url": f"https://t.me/{BOT_USERNAME}", "style": CURRENT_BUTTON_STYLE}]]
+                                    }
+                                }
+                                requests.post(url_msg, json=group_payload)
+                                
+                                if active_otp_threads.get(chat_id) == thread_id:
+                                    del active_otp_threads[chat_id]
+                                    
+                                return
+            time.sleep(3)
+        except Exception as e:
+            time.sleep(3)
+            
+    if active_otp_threads.get(chat_id) == thread_id:
+        del active_otp_threads[chat_id]
+
+@bot.callback_query_handler(func=lambda call: True)
+def callback_handler(call):
+    data = call.data
+    user_id = call.from_user.id
+    chat_id = call.message.chat.id
+    message_id = call.message.message_id
+
+    if data == "wd_full":
+        if user_id in user_states and isinstance(user_states[user_id], dict):
+            st = user_states[user_id]
+            bal = st['balance']
+            pay_id = st['pay_id']
+            cursor.execute('INSERT INTO withdrawals (user_id, amount, pay_id) VALUES (?, ?, ?)', (user_id, bal, pay_id))
+            conn.commit()
+            wd_id = cursor.lastrowid
+            del user_states[user_id]
+            
+            url_edit = f"https://api.telegram.org/bot{TOKEN}/editMessageText"
+            requests.post(url_edit, json={"chat_id": chat_id, "message_id": message_id, "text": "✅ Your full balance withdrawal request has been sent to the admin!"})
+            
+            admin_inline = [
+                [
+                    {"text": "✅ Approve", "callback_data": f"wd_app_{wd_id}", "style": "success"},
+                    {"text": "❌ Cancel", "callback_data": f"wd_can_{wd_id}", "style": "danger"}
+                ]
+            ]
+            url_send = f"https://api.telegram.org/bot{TOKEN}/sendMessage"
+            requests.post(url_send, json={
+                "chat_id": ADMIN_ID,
+                "text": f"🔔 **New Withdraw Request!**\n\n👤 User ID: `{user_id}`\n🏦 Method: Binance\n📱 Pay ID: `{pay_id}`\n💰 Amount: `${bal:.4f}`",
+                "reply_markup": {"inline_keyboard": admin_inline},
+                "parse_mode": "Markdown"
+            })
+        return
+
+    elif data == "wd_custom":
+        if user_id in user_states and isinstance(user_states[user_id], dict):
+            user_states[user_id]['state'] = 'waiting_for_custom_amount'
+            url_edit = f"https://api.telegram.org/bot{TOKEN}/editMessageText"
+            requests.post(url_edit, json={"chat_id": chat_id, "message_id": message_id, "text": "✏️ Please enter the amount (USD) you want to withdraw:"})
+        return
+
+    elif data.startswith("wd_app_") or data.startswith("wd_can_"):
+        if not is_admin(user_id):
+            return
+        wd_id = int(data.split("_")[2])
+        action = data.split("_")[1]
+        
+        cursor.execute('SELECT user_id, amount FROM withdrawals WHERE id = ?', (wd_id,))
+        row = cursor.fetchone()
+        if row:
+            u_id, amt = row[0], row[1]
+            url_edit = f"https://api.telegram.org/bot{TOKEN}/editMessageText"
+            if action == 'app':
+                cursor.execute('UPDATE users SET balance = balance - ? WHERE user_id = ?', (amt, u_id))
+                conn.commit()
+                bot.answer_callback_query(call.id, "Approved successfully!")
+                requests.post(url_edit, json={"chat_id": chat_id, "message_id": message_id, "text": "✅ Withdrawal request approved."})
+                try:
+                    bot.send_message(u_id, f"✅ Your withdrawal request has been approved! (${amt})")
+                except:
+                    pass
+            else:
+                bot.answer_callback_query(call.id, "Cancelled!")
+                requests.post(url_edit, json={"chat_id": chat_id, "message_id": message_id, "text": "❌ Withdrawal request cancelled."})
+                try:
+                    bot.send_message(u_id, f"❌ Your withdrawal request has been cancelled.")
+                except:
+                    pass
+        return
+
+    if data.startswith("user_serv_"):
+        serv_name = data.replace("user_serv_", "")
+        cursor.execute('SELECT id, country_data FROM services_countries WHERE service_name = ?', (serv_name,))
+        rows = cursor.fetchall()
+        
+        inline_keyboard = []
+        if rows:
+            for row in rows:
+                row_id = row[0]
+                parts = row[1].split('|')
+                if len(parts) >= 3:
+                    c_name = parts[0].strip()
+                    c_flag = parts[2].strip()
+                    inline_keyboard.append([{"text": f"{c_flag} {c_name}", "callback_data": f"get_num_{row_id}", "style": CURRENT_BUTTON_STYLE}])
+        else:
+            inline_keyboard.append([{"text": "⚠️ No countries available", "callback_data": "no_country", "style": "danger"}])
+
+        inline_keyboard.append([{"text": "🔙 Back", "callback_data": "user_back_to_services", "style": "danger"}])
+        
+        url_edit = f"https://api.telegram.org/bot{TOKEN}/editMessageText"
+        payload = {
+            "chat_id": chat_id,
+            "message_id": message_id,
+            "text": f"📁 Select country for **{serv_name}**:",
+            "reply_markup": {"inline_keyboard": inline_keyboard},
+            "parse_mode": "Markdown"
+        }
+        res = requests.post(url_edit, json=payload)
+        if res.status_code != 200:
+            url_send = f"https://api.telegram.org/bot{TOKEN}/sendMessage"
+            requests.post(url_send, json={
+                "chat_id": chat_id,
+                "text": f"📁 Select country for **{serv_name}**:",
+                "reply_markup": {"inline_keyboard": inline_keyboard},
+                "parse_mode": "Markdown"
+            })
+        return
+
+    elif data == "user_back_to_services":
+        services = ["Facebook", "Instagram", "Whatsapp", "Imo", "Tik tok", "Binance"]
+        inline_keyboard = []
+        for s in services:
+            if service_status.get(s, True):
+                btn_style = "primary" if s in ["Facebook", "Binance"] else "success"
+                inline_keyboard.append([{"text": s, "callback_data": f"user_serv_{s}", "style": btn_style}])
+        
+        url_edit = f"https://api.telegram.org/bot{TOKEN}/editMessageText"
+        requests.post(url_edit, json={
+            "chat_id": chat_id,
+            "message_id": message_id,
+            "text": "Select a service: ⬇️",
+            "reply_markup": {"inline_keyboard": inline_keyboard}
+        })
+        return
+
+    elif data.startswith("get_num_"):
+        try:
+            row_id = data.replace("get_num_", "")
+            if row_id == "new":
+                return
+            cursor.execute('SELECT service_name, country_data FROM services_countries WHERE id = ?', (row_id,))
+            row = cursor.fetchone()
+            
+            if not row:
+                bot.answer_callback_query(call.id, "Country data not found!", show_alert=True)
+                return
+                
+            serv_name, country_data = row[0], row[1]
+            parts = country_data.split('|')
+            country_full_name = parts[0].strip() if len(parts) >= 1 else "Unknown"
+            c_flag = parts[2].strip() if len(parts) >= 3 else "🌐"
+            short_code = parts[3].strip() if len(parts) >= 4 else "XX"
+            raw_range = parts[1].strip()
+            range_val = raw_range.replace("+", "")
+            
+            api_url = f"{API_BASE_URL}getnum"
+            headers = {'X-API-Key': CURRENT_API_KEY, 'Content-Type': 'application/json'}
+            payload = {'range': range_val}
+            
+            response = requests.post(api_url, json=payload, headers=headers, timeout=10)
+            
+            if response.status_code == 200:
+                res_json = response.json()
+                if res_json.get('meta', {}).get('code') == 200 and 'data' in res_json:
+                    res_data = res_json['data']
+                    phone = res_data.get('full_number') or res_data.get('no_plus_number')
+                    
+                    if phone:
+                        bot.answer_callback_query(call.id, "New number assigned!")
+                        
+                        thread_id = time.time()
+                        active_otp_threads[chat_id] = thread_id
+                        
+                        inline_keyboard = [
+                            [
+                                {"text": "Change", "callback_data": f"get_num_{row_id}", "style": "danger"},
+                                {"text": "OTP Group", "url": OTP_GROUP_LINK, "style": "success"}
+                            ],
+                            [
+                                {"text": "🔙 Back", "callback_data": "user_back_to_services", "style": CURRENT_BUTTON_STYLE}
+                            ]
+                        ]
+                        
+                        assigned_text = (
+                            f"<b>{serv_name.upper()} - {country_full_name.upper()} {c_flag}</b>\n"
+                            f"<b>NUMBER ASSIGNED!</b>\n\n"
+                            f"📞 Number: <code>{phone}</code>\n"
+                            f"🌍 Country: {country_full_name.upper()} {c_flag}\n\n"
+                            f"⏳ WAITING FOR OTP...................."
+                        )
+                        
+                        url_edit = f"https://api.telegram.org/bot{TOKEN}/editMessageText"
+                        requests.post(url_edit, json={
+                            "chat_id": chat_id,
+                            "message_id": message_id,
+                            "text": assigned_text,
+                            "parse_mode": "HTML",
+                            "reply_markup": {"inline_keyboard": inline_keyboard}
+                        })
+                        
+                        threading.Thread(target=check_otp_background, args=(chat_id, phone, serv_name, c_flag, country_full_name, short_code, thread_id)).start()
+                    else:
+                        bot.answer_callback_query(call.id, "No numbers available right now!", show_alert=True)
+                else:
+                    bot.answer_callback_query(call.id, "Stock out!", show_alert=True)
+        except Exception as e:
+            bot.answer_callback_query(call.id, "API connection error.", show_alert=True)
+        return
+
+    elif data.startswith("admin_") or data.startswith("toggle_serv_") or data.startswith("country_") or data.startswith("del_c_id_") or data == "no_country" or data.startswith("app_wd_") or data.startswith("can_wd_"):
+        if not is_admin(user_id):
+            bot.answer_callback_query(call.id, "⚠️ Unauthorized!", show_alert=True)
+            return
+
+        url_edit = f"https://api.telegram.org/bot{TOKEN}/editMessageText"
+
+        if data == "admin_back":
+            requests.post(url_edit, json={
+                "chat_id": chat_id,
+                "message_id": message_id,
+                "text": "⚙️ **Admin Control Panel:**",
+                "reply_markup": get_admin_markup().to_json(),
+                "parse_mode": "Markdown"
+            })
+            return
+            
+        elif data == "admin_users":
+            cursor.execute('SELECT COUNT(*) FROM users')
+            total = cursor.fetchone()[0]
+            back_markup = telebot.types.InlineKeyboardMarkup()
+            back_markup.add(telebot.types.InlineKeyboardButton("🔙 Back", callback_data="admin_back"))
+            requests.post(url_edit, json={
+                "chat_id": chat_id,
+                "message_id": message_id,
+                "text": f"👥 Total Users: `{total}`",
+                "reply_markup": back_markup.to_json(),
+                "parse_mode": "Markdown"
+            })
+            
+        elif data == "admin_stats":
+            back_markup = telebot.types.InlineKeyboardMarkup()
+            back_markup.add(telebot.types.InlineKeyboardButton("🔙 Back", callback_data="admin_back"))
+            requests.post(url_edit, json={
+                "chat_id": chat_id,
+                "message_id": message_id,
+                "text": "📊 Server Online ✅",
+                "reply_markup": back_markup.to_json(),
+                "parse_mode": "Markdown"
+            })
+            
+        elif data == "admin_manage_serv":
+            markup = telebot.types.InlineKeyboardMarkup(row_width=2)
+            for s, status in service_status.items():
+                status_icon = "✅ ON" if status else "❌ OFF"
+                markup.add(telebot.types.InlineKeyboardButton(f"{s}: {status_icon}", callback_data=f"toggle_serv_{s}"))
+            markup.add(telebot.types.InlineKeyboardButton("🔙 Back", callback_data="admin_back"))
+            requests.post(url_edit, json={
+                "chat_id": chat_id,
+                "message_id": message_id,
+                "text": "⚙️ **Service Management:**",
+                "reply_markup": markup.to_json(),
+                "parse_mode": "Markdown"
+            })
+            
+        elif data.startswith("toggle_serv_"):
+            s_name = data.replace("toggle_serv_", "")
+            if s_name in service_status:
+                service_status[s_name] = not service_status[s_name]
+            markup = telebot.types.InlineKeyboardMarkup(row_width=2)
+            for s, status in service_status.items():
+                status_icon = "✅ ON" if status else "❌ OFF"
+                markup.add(telebot.types.InlineKeyboardButton(f"{s}: {status_icon}", callback_data=f"toggle_serv_{s}"))
+            markup.add(telebot.types.InlineKeyboardButton("🔙 Back", callback_data="admin_back"))
+            requests.post(url_edit, json={
+                "chat_id": chat_id,
+                "message_id": message_id,
+                "text": "⚙️ **Service Management:**",
+                "reply_markup": markup.to_json(),
+                "parse_mode": "Markdown"
+            })
+            
+        elif data == "admin_manage_countries":
+            markup = telebot.types.InlineKeyboardMarkup(row_width=2)
+            services = ["Facebook", "Instagram", "Tik tok", "Whatsapp", "Imo", "Binance"]
+            for s in services:
+                markup.add(
+                    telebot.types.InlineKeyboardButton(f"{s}", callback_data=f"ignore_{s}"),
+                    telebot.types.InlineKeyboardButton("➕ Add", callback_data=f"country_add_{s}"),
+                    telebot.types.InlineKeyboardButton("📋 List", callback_data=f"country_list_{s}"),
+                    telebot.types.InlineKeyboardButton("🗑 Delete", callback_data=f"country_del_menu_{s}")
+                )
+            markup.add(telebot.types.InlineKeyboardButton("🔙 Back", callback_data="admin_back"))
+            requests.post(url_edit, json={
+                "chat_id": chat_id,
+                "message_id": message_id,
+                "text": "🌐 **Country Management:**",
+                "reply_markup": markup.to_json(),
+                "parse_mode": "Markdown"
+            })
+            
+        elif data.startswith("country_add_"):
+            s_name = data.replace("country_add_", "")
+            user_states[user_id] = f'adding_country_{s_name}'
+            back_markup = telebot.types.InlineKeyboardMarkup()
+            back_markup.add(telebot.types.InlineKeyboardButton("🔙 Back", callback_data="admin_back"))
+            requests.post(url_edit, json={
+                "chat_id": chat_id,
+                "message_id": message_id,
+                "text": f"🌐 Add country for **{s_name}**:\n`Country | Range | Flag | Shortcode`",
+                "reply_markup": back_markup.to_json(),
+                "parse_mode": "Markdown"
+            })
+            
+        elif data.startswith("country_list_"):
+            s_name = data.replace("country_list_", "")
+            cursor.execute('SELECT id, country_data FROM services_countries WHERE service_name = ?', (s_name,))
+            rows = cursor.fetchall()
+            text_res = f"📋 **Countries for {s_name}:**\n\n"
+            for r in rows:
+                text_res += f"ID: `{r[0]}` | Data: `{r[1]}`\n"
+            back_markup = telebot.types.InlineKeyboardMarkup()
+            back_markup.add(telebot.types.InlineKeyboardButton("🔙 Back", callback_data="admin_back"))
+            requests.post(url_edit, json={
+                "chat_id": chat_id,
+                "message_id": message_id,
+                "text": text_res,
+                "reply_markup": back_markup.to_json(),
+                "parse_mode": "Markdown"
+            })
+
+        elif data.startswith("country_del_menu_"):
+            s_name = data.replace("country_del_menu_", "")
+            cursor.execute('SELECT id, country_data FROM services_countries WHERE service_name = ?', (s_name,))
+            rows = cursor.fetchall()
+            markup = telebot.types.InlineKeyboardMarkup(row_width=1)
+            for r in rows:
+                markup.add(telebot.types.InlineKeyboardButton(f"🗑 Delete: {r[1]}", callback_data=f"del_c_id_{r[0]}"))
+            markup.add(telebot.types.InlineKeyboardButton("🔙 Back", callback_data="admin_manage_countries"))
+            requests.post(url_edit, json={
+                "chat_id": chat_id,
+                "message_id": message_id,
+                "text": "🗑 Click to delete:",
+                "reply_markup": markup.to_json(),
+                "parse_mode": "Markdown"
+            })
+
+        elif data.startswith("del_c_id_"):
+            c_id = data.replace("del_c_id_", "")
+            cursor.execute('DELETE FROM services_countries WHERE id = ?', (c_id,))
+            conn.commit()
+            bot.answer_callback_query(call.id, "Deleted successfully!")
+            back_markup = telebot.types.InlineKeyboardMarkup()
+            back_markup.add(telebot.types.InlineKeyboardButton("🔙 Back", callback_data="admin_back"))
+            requests.post(url_edit, json={
+                "chat_id": chat_id,
+                "message_id": message_id,
+                "text": "✅ Deleted successfully!",
+                "reply_markup": back_markup.to_json()
+            })
+
+        elif data == "admin_api_settings":
+            user_states[user_id] = 'waiting_for_api'
+            back_markup = telebot.types.InlineKeyboardMarkup()
+            back_markup.add(telebot.types.InlineKeyboardButton("🔙 Back", callback_data="admin_back"))
+            requests.post(url_edit, json={
+                "chat_id": chat_id,
+                "message_id": message_id,
+                "text": f"🔑 Current API Key: `{CURRENT_API_KEY}`\n\nSend new API key:",
+                "reply_markup": back_markup.to_json(),
+                "parse_mode": "Markdown"
+            })
+            
+        elif data == "admin_change_otp_reward":
+            user_states[user_id] = 'waiting_for_otp_reward'
+            back_markup = telebot.types.InlineKeyboardMarkup()
+            back_markup.add(telebot.types.InlineKeyboardButton("🔙 Back", callback_data="admin_back"))
+            requests.post(url_edit, json={
+                "chat_id": chat_id,
+                "message_id": message_id,
+                "text": f"🎁 Current Reward: `${OTP_REWARD}`\n\nSend new amount:",
+                "reply_markup": back_markup.to_json(),
+                "parse_mode": "Markdown"
+            })
+
+        elif data == "admin_change_btn_style":
+            user_states[user_id] = 'waiting_for_btn_style'
+            back_markup = telebot.types.InlineKeyboardMarkup()
+            back_markup.add(telebot.types.InlineKeyboardButton("🔙 Back", callback_data="admin_back"))
+            requests.post(url_edit, json={
+                "chat_id": chat_id,
+                "message_id": message_id,
+                "text": f"🎨 Current Button Style: `{CURRENT_BUTTON_STYLE}`\n\nSend new style name (`success`, `primary`, or `danger`):",
+                "reply_markup": back_markup.to_json(),
+                "parse_mode": "Markdown"
+            })
+
+        elif data == "admin_pending_payments":
+            cursor.execute('SELECT id, user_id, amount, pay_id FROM withdrawals WHERE status = "pending"')
+            rows = cursor.fetchall()
+            if not rows:
+                bot.answer_callback_query(call.id, "No pending payments!", show_alert=True)
+                return
+            for r in rows:
+                w_id, u_id, amt, p_id = r[0], r[1], r[2], r[3]
+                inline_keyboard = [
+                    [
+                        {"text": "✅ Approve", "callback_data": f"app_wd_{w_id}", "style": "success"},
+                        {"text": "❌ Cancel", "callback_data": f"can_wd_{w_id}", "style": "danger"}
+                    ]
+                ]
+                url_send = f"https://api.telegram.org/bot{TOKEN}/sendMessage"
+                requests.post(url_send, json={
+                    "chat_id": chat_id,
+                    "text": f"📌 **Pending Withdraw:**\n\n👤 User ID: `{u_id}`\n🏦 Pay ID: `{p_id}`\n💰 Amount: `${amt:.4f}`",
+                    "reply_markup": {"inline_keyboard": inline_keyboard},
+                    "parse_mode": "Markdown"
+                })
+            bot.answer_callback_query(call.id, "Pending list loaded.")
+
+        elif data.startswith("app_wd_") or data.startswith("can_wd_"):
+            w_id = int(data.split("_")[2])
+            action = data.split("_")[1]
+            cursor.execute('SELECT user_id, amount FROM withdrawals WHERE id = ?', (w_id,))
+            row = cursor.fetchone()
+            if row:
+                u_id, amt = row[0], row[1]
+                if action == 'app':
+                    cursor.execute('UPDATE users SET balance = balance - ? WHERE user_id = ?', (amt, u_id))
+                    cursor.execute('UPDATE withdrawals SET status = "approved" WHERE id = ?', (w_id,))
+                    conn.commit()
+                    requests.post(url_edit, json={"chat_id": chat_id, "message_id": message_id, "text": "✅ Withdrawal approved!"})
+                    try:
+                        bot.send_message(u_id, f"✅ Your withdrawal request has been approved! (${amt})")
+                    except:
+                        pass
+                else:
+                    cursor.execute('UPDATE withdrawals SET status = "cancelled" WHERE id = ?', (w_id,))
+                    conn.commit()
+                    requests.post(url_edit, json={"chat_id": chat_id, "message_id": message_id, "text": "❌ Withdrawal cancelled!"})
+                    try:
+                        bot.send_message(u_id, f"❌ Your withdrawal request has been cancelled.")
+                    except:
+                        pass
+            return
+            
+        elif data == "admin_change_method":
+            user_states[user_id] = 'waiting_for_method_channel'
+            back_markup = telebot.types.InlineKeyboardMarkup()
+            back_markup.add(telebot.types.InlineKeyboardButton("🔙 Back", callback_data="admin_back"))
+            requests.post(url_edit, json={
+                "chat_id": chat_id,
+                "message_id": message_id,
+                "text": f"📢 Current Channel: `{METHOD_CHANNEL_LINK}`\n\nSend new link:",
+                "reply_markup": back_markup.to_json(),
+                "parse_mode": "Markdown"
+            })
+
+        elif data == "admin_change_support":
+            user_states[user_id] = 'waiting_for_support_id'
+            back_markup = telebot.types.InlineKeyboardMarkup()
+            back_markup.add(telebot.types.InlineKeyboardButton("🔙 Back", callback_data="admin_back"))
+            requests.post(url_edit, json={
+                "chat_id": chat_id,
+                "message_id": message_id,
+                "text": f"🆘 Current Support ID: `@{SUPPORT_ADMIN_USERNAME}`\n\nSend new username:",
+                "reply_markup": back_markup.to_json(),
+                "parse_mode": "Markdown"
+            })
+            
+        elif data == "admin_change_withdraw":
+            user_states[user_id] = 'waiting_for_withdraw_limit'
+            back_markup = telebot.types.InlineKeyboardMarkup()
+            back_markup.add(telebot.types.InlineKeyboardButton("🔙 Back", callback_data="admin_back"))
+            requests.post(url_edit, json={
+                "chat_id": chat_id,
+                "message_id": message_id,
+                "text": f"💵 Current Limit: `${WITHDRAW_LIMIT}`\n\nSend new limit:",
+                "reply_markup": back_markup.to_json(),
+                "parse_mode": "Markdown"
+            })
+            
+        elif data == "admin_change_ref_bonus":
+            user_states[user_id] = 'waiting_for_ref_bonus'
+            back_markup = telebot.types.InlineKeyboardMarkup()
+            back_markup.add(telebot.types.InlineKeyboardButton("🔙 Back", callback_data="admin_back"))
+            requests.post(url_edit, json={
+                "chat_id": chat_id,
+                "message_id": message_id,
+                "text": f"🎁 Current Ref Bonus: `{REFERRAL_BONUS}`\n\nSend new bonus:",
+                "reply_markup": back_markup.to_json(),
+                "parse_mode": "Markdown"
+            })
+            
+        elif data == "admin_broadcast":
+            user_states[user_id] = 'waiting_for_broadcast'
+            back_markup = telebot.types.InlineKeyboardMarkup()
+            back_markup.add(telebot.types.InlineKeyboardButton("🔙 Back", callback_data="admin_back"))
+            requests.post(url_edit, json={
+                "chat_id": chat_id,
+                "message_id": message_id,
+                "text": "📢 Send your broadcast message:",
+                "reply_markup": back_markup.to_json()
+            })
+            
+        elif data == "admin_add_bal":
+            user_states[user_id] = 'waiting_for_add_bal'
+            back_markup = telebot.types.InlineKeyboardMarkup()
+            back_markup.add(telebot.types.InlineKeyboardButton("🔙 Back", callback_data="admin_back"))
+            requests.post(url_edit, json={
+                "chat_id": chat_id,
+                "message_id": message_id,
+                "text": "➕ Send: `User_ID Amount`",
+                "reply_markup": back_markup.to_json(),
+                "parse_mode": "Markdown"
+            })
+            
+        elif data == "admin_cut_bal":
+            user_states[user_id] = 'waiting_for_cut_bal'
+            back_markup = telebot.types.InlineKeyboardMarkup()
+            back_markup.add(telebot.types.InlineKeyboardButton("🔙 Back", callback_data="admin_back"))
+            requests.post(url_edit, json={
+                "chat_id": chat_id,
+                "message_id": message_id,
+                "text": "➖ Send: `User_ID Amount`",
+                "reply_markup": back_markup.to_json(),
+                "parse_mode": "Markdown"
+            })
+            
+        elif data == "admin_ban_user":
+            user_states[user_id] = 'waiting_for_ban'
+            back_markup = telebot.types.InlineKeyboardMarkup()
+            back_markup.add(telebot.types.InlineKeyboardButton("🔙 Back", callback_data="admin_back"))
+            requests.post(url_edit, json={
+                "chat_id": chat_id,
+                "message_id": message_id,
+                "text": "🚫 Send user ID to ban:",
+                "reply_markup": back_markup.to_json()
+            })
+            
+        elif data == "admin_unban_user":
+            user_states[user_id] = 'waiting_for_unban'
+            back_markup = telebot.types.InlineKeyboardMarkup()
+            back_markup.add(telebot.types.InlineKeyboardButton("🔙 Back", callback_data="admin_back"))
+            requests.post(url_edit, json={
+                "chat_id": chat_id,
+                "message_id": message_id,
+                "text": "✅ Send user_id to unban:",
+                "reply_markup": back_markup.to_json()
+            })
+            
+        elif data == "admin_add_subadmin":
+            user_states[user_id] = 'waiting_for_subadmin'
+            back_markup = telebot.types.InlineKeyboardMarkup()
+            back_markup.add(telebot.types.InlineKeyboardButton("🔙 Back", callback_data="admin_back"))
+            requests.post(url_edit, json={
+                "chat_id": chat_id,
+                "message_id": message_id,
+                "text": "➕ Send user ID for sub-admin:",
+                "reply_markup": back_markup.to_json()
+            })
+
+if __name__ == '__main__':
+    port = int(os.environ.get('PORT', 8080))
+    
+    RENDER_URL = os.environ.get('RENDER_EXTERNAL_URL')
+    if RENDER_URL:
+        bot.remove_webhook()
+        bot.set_webhook(url=f"{RENDER_URL}/{TOKEN}")
+        print(f"Webhook set to: {RENDER_URL}/{TOKEN}")
+
+    print("Bot is running successfully with Webhook...")
+    app.run(host='0.0.0.0', port=port)
